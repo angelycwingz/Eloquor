@@ -5,5 +5,8 @@ google-generativeai>=0.8.0
 # Vertex AI (used by ADK under the hood for Cloud Run deployment)
 google-cloud-aiplatform>=1.60.0
 
+# Connecting to PostgreSQL/AlloyDB.
+psycopg2-binary
+
 # Utilities
 python-dotenv>=1.0.0

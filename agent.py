@@ -29,8 +29,10 @@ from .prompts import (
     FEEDBACK_PROMPT,
 )
 from .tools import (
-    save_session_to_memory,      
+    check_interview_complete,
+    save_session_to_memory, 
     get_past_sessions,
+    search_similar_sessions,     
     format_scorecard_as_text,
 )
 
@@ -60,59 +62,28 @@ job_intel_agent = LlmAgent(
     output_key="job_intel",  # saves output to session.state["job_intel"]
 )
 
-# ---------------------------------------------------------------------------
-# Sub-Agent 2: Interview Conductor
-# No external tools needed — pure LLM conversation
-# ---------------------------------------------------------------------------
-# interview_agent = LlmAgent(
-#     name="interview_agent",
-#     model=MODEL,
-#     description=(
-#         "Plays the role of a professional interviewer. "
-#         "Conducts a realistic 5-question mock interview turn by turn, "
-#         "Asks ONE question at a time and waits for the user to respond "
-#         "before asking the next question. Never simulates user answers."
-#         "then outputs the full Q&A transcript as JSON."
-#     ),
-#     instruction=INTERVIEW_PROMPT,
-#     output_key="transcript",  # saves output to session.state["transcript"]
-# )
 
 # ---------------------------------------------------------------------------
-# Sub-Agent 3: Feedback Coach
+# Sub-Agent 2: Feedback Coach
 # Has access to Firestore save tool
 # ---------------------------------------------------------------------------
 feedback_agent = LlmAgent(
     name="feedback_agent",
     model=MODEL,
     description=(
-        "Scores the completed interview transcript and produces a scorecard."
+        "Reads the interview transcript, scores every answer on content, "
+        "structure, and language, produces a detailed scorecard and "
+        "7-day improvement plan, then saves the session to AlloyDB."
     ),
     instruction=FEEDBACK_PROMPT,
     tools=[
-        FunctionTool(save_session_to_memory),   
+        FunctionTool(save_session_to_memory),
         FunctionTool(get_past_sessions),
+        FunctionTool(search_similar_sessions),
         FunctionTool(format_scorecard_as_text),
     ],
     output_key="scorecard",  # saves output to session.state["scorecard"]
 )
-
-# ---------------------------------------------------------------------------
-# Fix 3: SequentialAgent runs the 3-step pipeline in order
-# This avoids the orchestrator LLM mixing tool types during delegation
-# ---------------------------------------------------------------------------
-# interview_pipeline = SequentialAgent(
-#     name="interview_pipeline",
-#     description=(
-#         "Runs the full interview workflow in order: "
-#         "job research → mock interview → feedback and scorecard."
-#     ),
-#     sub_agents=[
-#         job_intel_agent,
-#         interview_agent,
-#         feedback_agent,
-#     ],
-# )
 
 # ---------------------------------------------------------------------------
 # Root Agent: Orchestrator
@@ -126,6 +97,7 @@ root_agent = LlmAgent(
     ),
     instruction=ORCHESTRATOR_PROMPT,
     tools=[
+        FunctionTool(check_interview_complete),
         AgentTool(agent=job_intel_agent),
         AgentTool(agent=feedback_agent),
     ],
