@@ -34,6 +34,7 @@ from .tools import (
     get_past_sessions,
     search_similar_sessions,     
     format_scorecard_as_text,
+    schedule_practice_session
 )
 
 cloud_logging_client = google.cloud.logging.Client()
@@ -85,6 +86,43 @@ feedback_agent = LlmAgent(
     output_key="scorecard",  # saves output to session.state["scorecard"]
 )
 
+memory_agent = LlmAgent(
+    name="memory_agent",
+    model=MODEL,
+    description=(
+        "Analyzes user's past interview sessions and provides performance insights, trends, and coaching feedback."
+    ),
+    instruction=(
+        "You are Eloquor Memory Coach.\n\n"
+
+        "Your job is to analyze past interview sessions and answer questions like:\n"
+        "- How has the user been performing lately?\n"
+        "- Are they improving or declining?\n"
+        "- What are their strengths and weaknesses?\n\n"
+
+        "TOOLS AVAILABLE:\n"
+        "- get_past_sessions: fetch recent sessions\n"
+        "- search_similar_sessions: find relevant past sessions\n\n"
+
+        "INSTRUCTIONS:\n"
+        "1. Always call get_past_sessions first.\n"
+        "2. If needed, call search_similar_sessions for deeper insight.\n"
+        "3. Analyze trends in scores, roles, and performance.\n"
+        "4. Respond like a coach, not like a database.\n\n"
+
+        "OUTPUT STYLE:\n"
+        "- Start with a summary (1–2 lines)\n"
+        "- Then insights (bullets)\n"
+        "- Then actionable advice\n\n"
+
+        "Be encouraging but honest."
+    ),
+    tools=[
+        FunctionTool(get_past_sessions),
+        FunctionTool(search_similar_sessions),
+    ],
+)
+
 # ---------------------------------------------------------------------------
 # Root Agent: Orchestrator
 # ADK discovers this as `root_agent` via __init__.py
@@ -93,12 +131,14 @@ root_agent = LlmAgent(
     name="eloquor_orchestrator",
     model=MODEL,
     description=(
-        "Eloquor — an AI career communication coach. "
+        "Eloquor — an AI career communication coach with Google Calendar integration "
     ),
     instruction=ORCHESTRATOR_PROMPT,
     tools=[
         FunctionTool(check_interview_complete),
+        FunctionTool(schedule_practice_session),
         AgentTool(agent=job_intel_agent),
         AgentTool(agent=feedback_agent),
+        AgentTool(agent=memory_agent),
     ],
 )

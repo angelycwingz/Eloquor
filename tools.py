@@ -27,27 +27,6 @@ def _get_connection():
         sslmode="require",
     )
 
-def _generate_embedding(text: str) -> list:
-    """
-    Generates a vector embedding for the given text using Vertex AI
-    text-embedding-004 model via the AlloyDB google_ml_integration extension.
-    Falls back to None if embedding generation fails.
-    """
-    try:
-        conn = _get_connection()
-        cur = conn.cursor()
-        cur.execute(
-            "SELECT embedding('text-embedding-004', %s)::text",
-            (text[:8000],)  # truncate to stay within token limits
-        )
-        result = cur.fetchone()[0]
-        cur.close()
-        conn.close()
-        return result  # returns as string like "{0.123, -0.456, ...}"
-    except Exception as e:
-        logging.error(f"Embedding generation failed: {e}")
-        return None
-
 
 def check_interview_complete(answers_so_far: int) -> dict:
     """
@@ -84,7 +63,6 @@ def check_interview_complete(answers_so_far: int) -> dict:
             "message": f"Interview in progress. {remaining} question(s) remaining. Ask the next question."
         }
 
-
 def save_session_to_memory(
     user_id: str,
     target_role: str,
@@ -95,35 +73,67 @@ def save_session_to_memory(
 ) -> dict:
     """
     Saves a completed interview session to AlloyDB.
-    Embedding generation is skipped for now — added back once basic save works.
+    Embedding is generated inside SQL.
+    Falls back safely if embedding fails.
     """
     try:
-        conn = _get_connection()
-        cur = conn.cursor()
+        text_for_embedding = scorecard_text or transcript
+        if not text_for_embedding:
+            text_for_embedding = "empty session"
 
-        cur.execute(
-            """
-            INSERT INTO sessions
-                (user_id, session_date, target_role, experience_level,
-                 overall_score, transcript, scorecard_text)
-            VALUES
-                (%s, %s, %s, %s, %s, %s, %s)
-            RETURNING id
-            """,
-            (
-                user_id,
-                date.today(),
-                target_role,
-                experience_level,
-                overall_score,
-                transcript,
-                scorecard_text,
-            )
-        )
-        session_id = cur.fetchone()[0]
-        conn.commit()
-        cur.close()
-        conn.close()
+        with _get_connection() as conn:
+            with conn.cursor() as cur:
+
+                try:
+                    # ✅ Insert with embedding
+                    cur.execute(
+                        """
+                        INSERT INTO sessions
+                            (user_id, session_date, target_role, experience_level,
+                             overall_score, transcript, scorecard_text, embedding)
+                        VALUES
+                            (%s, %s, %s, %s, %s, %s, %s,
+                             embedding('text-embedding-004', %s))
+                        RETURNING id
+                        """,
+                        (
+                            user_id,
+                            date.today(),
+                            target_role,
+                            experience_level,
+                            overall_score,
+                            transcript,
+                            scorecard_text,
+                            text_for_embedding,
+                        )
+                    )
+
+                except Exception as embed_error:
+                    logging.error(f"Embedding insert failed, fallback used: {embed_error}")
+
+                    # ✅ fallback insert (no embedding)
+                    cur.execute(
+                        """
+                        INSERT INTO sessions
+                            (user_id, session_date, target_role, experience_level,
+                             overall_score, transcript, scorecard_text)
+                        VALUES
+                            (%s, %s, %s, %s, %s, %s, %s)
+                        RETURNING id
+                        """,
+                        (
+                            user_id,
+                            date.today(),
+                            target_role,
+                            experience_level,
+                            overall_score,
+                            transcript,
+                            scorecard_text,
+                        )
+                    )
+
+                session_id = cur.fetchone()[0]
+                conn.commit()
 
         return {
             "status": "saved",
@@ -191,43 +201,27 @@ def get_past_sessions(user_id: str, limit: int = 5) -> dict:
 
 def search_similar_sessions(user_id: str, query: str, limit: int = 3) -> dict:
     """
-    Searches the user's past sessions semantically using vector similarity.
-    Use this when the user asks things like:
-      - "when did I struggle with technical questions?"
-      - "show me my weakest interview"
-      - "how have I done with behavioural questions?"
- 
-    Args:
-        user_id: The unique identifier for the user.
-        query:   A natural language description of what to search for.
-        limit:   How many similar sessions to return. Defaults to 3.
- 
-    Returns:
-        A dict with the most semantically similar past sessions.
+    Semantic search using AlloyDB vector embeddings.
+    Uses SQL-based embedding (no Python embedding).
     """
     try:
-        query_embedding = _generate_embedding(query)
-        if not query_embedding:
-            return {"sessions": [], "error": "Could not generate query embedding."}
- 
-        conn = _get_connection()
-        cur = conn.cursor()
- 
-        cur.execute(
-            """
-            SELECT id, session_date, target_role, overall_score, scorecard_text,
-                   1 - (embedding <=> %s::vector) AS similarity
-            FROM sessions
-            WHERE user_id = %s
-            ORDER BY embedding <=> %s::vector
-            LIMIT %s
-            """,
-            (query_embedding, user_id, query_embedding, limit)
-        )
-        rows = cur.fetchall()
-        cur.close()
-        conn.close()
- 
+        with _get_connection() as conn:
+            with conn.cursor() as cur:
+
+                cur.execute(
+                    """
+                    SELECT id, session_date, target_role, overall_score, scorecard_text,
+                           1 - (embedding <=> embedding('text-embedding-004', %s)) AS similarity
+                    FROM sessions
+                    WHERE user_id = %s
+                    ORDER BY embedding <=> embedding('text-embedding-004', %s)
+                    LIMIT %s
+                    """,
+                    (query, user_id, query, limit)
+                )
+
+                rows = cur.fetchall()
+
         sessions = [
             {
                 "session_id": row[0],
@@ -239,17 +233,15 @@ def search_similar_sessions(user_id: str, query: str, limit: int = 3) -> dict:
             }
             for row in rows
         ]
- 
+
         return {
             "sessions": sessions,
             "count": len(sessions)
         }
- 
+
     except Exception as e:
         logging.error(f"Semantic search failed: {e}")
         return {"sessions": [], "error": str(e)}
- 
-
 
 def format_scorecard_as_text(scorecard_json: str) -> str:
     """
@@ -268,3 +260,141 @@ def format_scorecard_as_text(scorecard_json: str) -> str:
     for i in data.get("improvements", []):
         lines.append(f"- {i}")
     return "\n".join(lines)
+
+def schedule_practice_session(
+    role: str,
+    date: str,
+    time: str,
+    duration_minutes: int = 60,
+) -> dict:
+    """
+    Schedules a mock interview practice session in Google Calendar.
+    Call this when the user asks to schedule or book a practice session.
+
+    Args:
+        role:             The job role the user is preparing for.
+        date:             The date for the session e.g. 'tomorrow', '2026-04-10', 'next Monday'.
+        time:             The time for the session e.g. '6pm', '18:00', '10:30am'.
+        duration_minutes: How long the session should be in minutes. Defaults to 60.
+
+    Returns:
+        A dict with status, event link, and scheduled time if successful.
+    """
+    try:
+        from google.oauth2 import service_account
+        from googleapiclient.discovery import build
+        from datetime import datetime, timedelta
+        import json
+        import re
+        from dateutil import parser as dateparser
+
+        # ── Load credentials ────────────────────────────────────────────
+        key_json = os.getenv("CALENDAR_KEY_JSON")
+        if not key_json:
+            # Try loading from file for local dev
+            if os.path.exists("calendar-key.json"):
+                with open("calendar-key.json") as f:
+                    key_data = json.load(f)
+            else:
+                return {"status": "error", "message": "Calendar credentials not found."}
+        else:
+            key_data = json.loads(key_json)
+
+        credentials = service_account.Credentials.from_service_account_info(
+            key_data,
+            scopes=["https://www.googleapis.com/auth/calendar"]
+        )
+
+        calendar_id = os.getenv("CALENDAR_ID")
+        if not calendar_id:
+            return {"status": "error", "message": "CALENDAR_ID not set in environment."}
+
+        # ── Parse date and time ─────────────────────────────────────────
+        now = datetime.now()
+
+        # Handle relative dates
+        date_lower = date.lower().strip()
+        if date_lower == "tomorrow":
+            base_date = now + timedelta(days=1)
+        elif date_lower == "today":
+            base_date = now
+        elif "next" in date_lower:
+            day_name = date_lower.replace("next", "").strip()
+            days_ahead = {
+                "monday": 0, "tuesday": 1, "wednesday": 2,
+                "thursday": 3, "friday": 4, "saturday": 5, "sunday": 6
+            }.get(day_name, 1)
+            current_day = now.weekday()
+            days_until = (days_ahead - current_day + 7) % 7
+            if days_until == 0:
+                days_until = 7
+            base_date = now + timedelta(days=days_until)
+        else:
+            base_date = dateparser.parse(date)
+            if not base_date:
+                base_date = now + timedelta(days=1)
+
+        # Parse time
+        time_str = time.strip().upper().replace(" ", "")
+        try:
+            parsed_time = dateparser.parse(time_str)
+            hour = parsed_time.hour
+            minute = parsed_time.minute
+        except Exception:
+            # Default to 6pm if parsing fails
+            hour = 18
+            minute = 0
+
+        start_dt = base_date.replace(
+            hour=hour, minute=minute, second=0, microsecond=0
+        )
+        end_dt = start_dt + timedelta(minutes=duration_minutes)
+
+        # ── Build event ─────────────────────────────────────────────────
+        event = {
+            "summary": f"Eloquor Practice — {role}",
+            "description": (
+                f"Mock interview practice session for {role}.\n\n"
+                f"Tips to prepare:\n"
+                f"- Review the company's recent news and products\n"
+                f"- Practice the STAR method for behavioural questions\n"
+                f"- Revise core technical concepts for the role\n\n"
+                f"Scheduled by Eloquor AI Career Coach."
+            ),
+            "start": {
+                "dateTime": start_dt.isoformat(),
+                "timeZone": "Asia/Kolkata",
+            },
+            "end": {
+                "dateTime": end_dt.isoformat(),
+                "timeZone": "Asia/Kolkata",
+            },
+            "reminders": {
+                "useDefault": False,
+                "overrides": [
+                    {"method": "popup", "minutes": 30},
+                    {"method": "email", "minutes": 60},
+                ],
+            },
+        }
+
+        # ── Create event ─────────────────────────────────────────────────
+        service = build("calendar", "v3", credentials=credentials)
+        created_event = service.events().insert(
+            calendarId=calendar_id,
+            body=event
+        ).execute()
+
+        return {
+            "status": "scheduled",
+            "event_title": event["summary"],
+            "date": start_dt.strftime("%A, %d %B %Y"),
+            "time": start_dt.strftime("%I:%M %p"),
+            "duration": f"{duration_minutes} minutes",
+            "event_link": created_event.get("htmlLink", ""),
+            "message": f"Practice session scheduled for {start_dt.strftime('%A, %d %B at %I:%M %p')}."
+        }
+
+    except Exception as e:
+        logging.error(f"Calendar scheduling failed: {e}")
+        return {"status": "error", "message": str(e)}
