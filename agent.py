@@ -18,7 +18,6 @@ from dotenv import load_dotenv
 
 from google.adk.agents import LlmAgent
 from google.adk.agents import SequentialAgent
-# from google.adk.tools import google_search  # ADK built-in grounded search tool
 from google.adk.tools.google_search_tool import GoogleSearchTool
 from google.adk.tools import FunctionTool
 from google.adk.tools.agent_tool import AgentTool
@@ -108,6 +107,7 @@ memory_agent = LlmAgent(
         "1. Always call get_past_sessions first.\n"
         "2. If needed, call search_similar_sessions for deeper insight.\n"
         "3. Analyze trends in scores, roles, and performance.\n"
+        "4. search the user's session from their name in lower case.\n\n"
         "4. Respond like a coach, not like a database.\n\n"
 
         "OUTPUT STYLE:\n"
